@@ -4415,4 +4415,1494 @@ describe('CachedProjectRepository', () => {
 
 **Next:** Pattern 7.6 (Read/Write Separation) or move to next structural pattern?
 
+## Pattern 7.6: Read/Write Repository Separation
 
+### The Problem
+
+Most applications have different requirements for reads vs writes:
+
+**Reads (Queries):**
+
+* High volume (90% of operations)
+* Complex joins and aggregations
+* Can use denormalized data
+* Can tolerate slight staleness
+* Need to be fast
+
+**Writes (Commands):**
+
+* Lower volume (10% of operations)
+* Need ACID guarantees
+* Must be consistent immediately
+* Need validation and business rules
+* Can be slower
+
+**Single Repository Problem:**
+
+```typescript
+// ❌ BAD: One repository trying to serve both needs
+class ProjectRepository {
+  // Write operations need normalized data
+  async save(project: Project) {
+    await db.query('INSERT INTO projects...');
+    await db.query('INSERT INTO project_stats...');
+    await db.query('UPDATE tenant_aggregates...');
+  }
+  
+  // Read operations want denormalized data
+  async findWithDetails(projectId: string) {
+    // Complex joins to get everything
+    return db.query(`
+      SELECT p.*, u.name as creator_name, 
+             COUNT(t.id) as task_count,
+             AVG(t.completion) as avg_completion
+      FROM projects p
+      JOIN users u ON p.created_by = u.id
+      LEFT JOIN tasks t ON t.project_id = p.id
+      WHERE p.id = ?
+      GROUP BY p.id, u.name
+    `);
+  }
+}
+```
+
+### The Solution: CQRS-Lite (Command Query Responsibility Segregation)
+
+Separate repositories for reads and writes:
+
+```
+Write Operations (Commands)
+     ↓
+Write Model (Normalized)
+     ↓
+Main Database
+     ↓ (sync)
+Read Model (Denormalized)
+     ↑
+Read Operations (Queries)
+```
+
+**Benefits:**
+
+* Optimize each side independently
+* Scale reads and writes separately
+* Simpler code (each repository has one job)
+* Better performance
+
+**Note:** This is "CQRS-Lite" because we're using the same database. Full CQRS uses separate databases.
+
+***
+
+### Implementation: TypeScript/Node.js
+
+#### Step 1: Define Separate Interfaces
+
+```typescript
+// domain/repositories/IProjectWriteRepository.ts
+export interface IProjectWriteRepository {
+  // Commands - modify state
+  create(project: Project): Promise<Project>;
+  update(project: Project): Promise<Project>;
+  delete(tenantId: string, projectId: string): Promise<boolean>;
+  
+  // Batch operations
+  createMany(projects: Project[]): Promise<Project[]>;
+  updateMany(projects: Project[]): Promise<Project[]>;
+  deleteMany(tenantId: string, projectIds: string[]): Promise<number>;
+}
+
+// domain/repositories/IProjectReadRepository.ts
+export interface IProjectReadRepository {
+  // Queries - no state modification
+  findById(tenantId: string, projectId: string): Promise<ProjectReadModel | null>;
+  findAll(tenantId: string): Promise<ProjectReadModel[]>;
+  findByStatus(tenantId: string, status: string): Promise<ProjectReadModel[]>;
+  search(tenantId: string, query: string): Promise<ProjectReadModel[]>;
+  
+  // Complex queries with aggregations
+  findWithStats(tenantId: string, projectId: string): Promise<ProjectWithStats | null>;
+  findDashboardData(tenantId: string): Promise<DashboardData>;
+  findByDateRange(tenantId: string, start: Date, end: Date): Promise<ProjectReadModel[]>;
+  
+  // Pagination
+  findWithPagination(
+    tenantId: string,
+    page: number,
+    limit: number,
+    filters?: any
+  ): Promise<PaginatedResult<ProjectReadModel>>;
+  
+  // Counts and aggregations
+  count(tenantId: string): Promise<number>;
+  countByStatus(tenantId: string): Promise<{ status: string; count: number }[]>;
+  getTotalBudget(tenantId: string): Promise<number>;
+}
+```
+
+#### Step 2: Define Read Models
+
+Read models can be different from write models - optimized for display:
+
+```typescript
+// domain/models/ProjectReadModel.ts
+
+// Simple read model
+export interface ProjectReadModel {
+  id: string;
+  tenantId: string;
+  name: string;
+  description: string;
+  status: string;
+  budget: number | null;
+  startDate: Date | null;
+  endDate: Date | null;
+  
+  // Denormalized data for display
+  creatorName: string;
+  creatorEmail: string;
+  taskCount: number;
+  completedTaskCount: number;
+  teamMemberCount: number;
+  
+  // Computed fields
+  completionPercentage: number;
+  isOverdue: boolean;
+  daysRemaining: number | null;
+  
+  // Timestamps
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// Complex read model with stats
+export interface ProjectWithStats {
+  project: ProjectReadModel;
+  stats: {
+    totalTasks: number;
+    completedTasks: number;
+    inProgressTasks: number;
+    todoTasks: number;
+    overdueTasks: number;
+    avgTaskCompletionTime: number;
+    budgetUsed: number;
+    budgetRemaining: number;
+  };
+  recentActivity: Activity[];
+  teamMembers: TeamMember[];
+}
+
+// Dashboard read model
+export interface DashboardData {
+  projectCount: number;
+  activeProjectCount: number;
+  completedProjectCount: number;
+  totalBudget: number;
+  totalBudgetUsed: number;
+  overdueProjectCount: number;
+  recentProjects: ProjectReadModel[];
+  projectsByStatus: { status: string; count: number }[];
+  upcomingDeadlines: { projectId: string; projectName: string; deadline: Date }[];
+}
+```
+
+#### Step 3: Implement Write Repository
+
+```typescript
+// infrastructure/repositories/ProjectWriteRepository.ts
+import { Pool } from 'pg';
+import { IProjectWriteRepository } from '../../domain/repositories/IProjectWriteRepository';
+import { Project } from '../../domain/entities/Project';
+
+export class ProjectWriteRepository implements IProjectWriteRepository {
+  constructor(private db: Pool) {}
+  
+  async create(project: Project): Promise<Project> {
+    const client = await this.db.connect();
+    
+    try {
+      await client.query('BEGIN');
+      
+      // Insert into normalized projects table
+      await client.query(
+        `INSERT INTO projects (
+          id, tenant_id, name, description, status, budget,
+          start_date, end_date, created_by, created_at, updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+        [
+          project.id,
+          project.tenantId,
+          project.name,
+          project.description,
+          project.status,
+          project.budget,
+          project.startDate,
+          project.endDate,
+          project.createdBy,
+          project.createdAt,
+          project.updatedAt
+        ]
+      );
+      
+      // Update denormalized read model
+      await this.updateReadModel(client, project);
+      
+      // Update aggregates
+      await client.query(
+        `INSERT INTO tenant_project_stats (tenant_id, project_count, last_updated)
+         VALUES ($1, 1, NOW())
+         ON CONFLICT (tenant_id)
+         DO UPDATE SET 
+           project_count = tenant_project_stats.project_count + 1,
+           last_updated = NOW()`,
+        [project.tenantId]
+      );
+      
+      await client.query('COMMIT');
+      return project;
+      
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+  
+  async update(project: Project): Promise<Project> {
+    const client = await this.db.connect();
+    
+    try {
+      await client.query('BEGIN');
+      
+      // Update normalized table
+      await client.query(
+        `UPDATE projects
+         SET name = $1, description = $2, status = $3,
+             budget = $4, start_date = $5, end_date = $6,
+             updated_at = $7
+         WHERE id = $8 AND tenant_id = $9`,
+        [
+          project.name,
+          project.description,
+          project.status,
+          project.budget,
+          project.startDate,
+          project.endDate,
+          project.updatedAt,
+          project.id,
+          project.tenantId
+        ]
+      );
+      
+      // Update read model
+      await this.updateReadModel(client, project);
+      
+      await client.query('COMMIT');
+      return project;
+      
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+  
+  async delete(tenantId: string, projectId: string): Promise<boolean> {
+    const client = await this.db.connect();
+    
+    try {
+      await client.query('BEGIN');
+      
+      // Delete from normalized table
+      const result = await client.query(
+        `DELETE FROM projects
+         WHERE id = $1 AND tenant_id = $2
+         RETURNING id`,
+        [projectId, tenantId]
+      );
+      
+      if (result.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+      
+      // Delete from read model
+      await client.query(
+        `DELETE FROM projects_read_model
+         WHERE id = $1 AND tenant_id = $2`,
+        [projectId, tenantId]
+      );
+      
+      // Update aggregates
+      await client.query(
+        `UPDATE tenant_project_stats
+         SET project_count = project_count - 1,
+             last_updated = NOW()
+         WHERE tenant_id = $1`,
+        [tenantId]
+      );
+      
+      await client.query('COMMIT');
+      return true;
+      
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+  
+  async createMany(projects: Project[]): Promise<Project[]> {
+    const client = await this.db.connect();
+    
+    try {
+      await client.query('BEGIN');
+      
+      for (const project of projects) {
+        await client.query(
+          `INSERT INTO projects (
+            id, tenant_id, name, description, status, budget,
+            start_date, end_date, created_by, created_at, updated_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+          [
+            project.id,
+            project.tenantId,
+            project.name,
+            project.description,
+            project.status,
+            project.budget,
+            project.startDate,
+            project.endDate,
+            project.createdBy,
+            project.createdAt,
+            project.updatedAt
+          ]
+        );
+        
+        await this.updateReadModel(client, project);
+      }
+      
+      await client.query('COMMIT');
+      return projects;
+      
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+  
+  // Helper: Update denormalized read model
+  private async updateReadModel(client: any, project: Project): Promise<void> {
+    // Get additional data for read model
+    const userData = await client.query(
+      `SELECT name, email FROM users WHERE id = $1`,
+      [project.createdBy]
+    );
+    
+    const taskStats = await client.query(
+      `SELECT 
+         COUNT(*) as total_tasks,
+         COUNT(*) FILTER (WHERE status = 'completed') as completed_tasks
+       FROM tasks
+       WHERE project_id = $1`,
+      [project.id]
+    );
+    
+    const teamCount = await client.query(
+      `SELECT COUNT(DISTINCT user_id) as team_count
+       FROM project_members
+       WHERE project_id = $1`,
+      [project.id]
+    );
+    
+    const user = userData.rows[0] || { name: 'Unknown', email: '' };
+    const stats = taskStats.rows[0] || { total_tasks: 0, completed_tasks: 0 };
+    const team = teamCount.rows[0] || { team_count: 0 };
+    
+    // Calculate computed fields
+    const completionPercentage = stats.total_tasks > 0
+      ? Math.round((stats.completed_tasks / stats.total_tasks) * 100)
+      : 0;
+    
+    const isOverdue = project.endDate
+      ? new Date() > project.endDate && project.status === 'active'
+      : false;
+    
+    const daysRemaining = project.endDate
+      ? Math.ceil((project.endDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24))
+      : null;
+    
+    // Upsert into read model table
+    await client.query(
+      `INSERT INTO projects_read_model (
+        id, tenant_id, name, description, status, budget,
+        start_date, end_date, creator_name, creator_email,
+        task_count, completed_task_count, team_member_count,
+        completion_percentage, is_overdue, days_remaining,
+        created_at, updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+      ON CONFLICT (id)
+      DO UPDATE SET
+        name = $3, description = $4, status = $5, budget = $6,
+        start_date = $7, end_date = $8, creator_name = $9, creator_email = $10,
+        task_count = $11, completed_task_count = $12, team_member_count = $13,
+        completion_percentage = $14, is_overdue = $15, days_remaining = $16,
+        updated_at = $18`,
+      [
+        project.id,
+        project.tenantId,
+        project.name,
+        project.description,
+        project.status,
+        project.budget,
+        project.startDate,
+        project.endDate,
+        user.name,
+        user.email,
+        stats.total_tasks,
+        stats.completed_tasks,
+        team.team_count,
+        completionPercentage,
+        isOverdue,
+        daysRemaining,
+        project.createdAt,
+        project.updatedAt
+      ]
+    );
+  }
+}
+```
+
+#### Step 4: Implement Read Repository
+
+```typescript
+// infrastructure/repositories/ProjectReadRepository.ts
+import { Pool } from 'pg';
+import { IProjectReadRepository } from '../../domain/repositories/IProjectReadRepository';
+import {
+  ProjectReadModel,
+  ProjectWithStats,
+  DashboardData
+} from '../../domain/models/ProjectReadModel';
+
+export class ProjectReadRepository implements IProjectReadRepository {
+  constructor(private db: Pool) {}
+  
+  async findById(tenantId: string, projectId: string): Promise<ProjectReadModel | null> {
+    // Simple query from denormalized read model
+    const result = await this.db.query(
+      `SELECT * FROM projects_read_model
+       WHERE id = $1 AND tenant_id = $2`,
+      [projectId, tenantId]
+    );
+    
+    if (result.rows.length === 0) {
+      return null;
+    }
+    
+    return this.mapToReadModel(result.rows[0]);
+  }
+  
+  async findAll(tenantId: string): Promise<ProjectReadModel[]> {
+    const result = await this.db.query(
+      `SELECT * FROM projects_read_model
+       WHERE tenant_id = $1
+       ORDER BY created_at DESC`,
+      [tenantId]
+    );
+    
+    return result.rows.map(row => this.mapToReadModel(row));
+  }
+  
+  async findByStatus(tenantId: string, status: string): Promise<ProjectReadModel[]> {
+    const result = await this.db.query(
+      `SELECT * FROM projects_read_model
+       WHERE tenant_id = $1 AND status = $2
+       ORDER BY created_at DESC`,
+      [tenantId, status]
+    );
+    
+    return result.rows.map(row => this.mapToReadModel(row));
+  }
+  
+  async search(tenantId: string, query: string): Promise<ProjectReadModel[]> {
+    const result = await this.db.query(
+      `SELECT * FROM projects_read_model
+       WHERE tenant_id = $1
+         AND (
+           name ILIKE $2
+           OR description ILIKE $2
+           OR creator_name ILIKE $2
+         )
+       ORDER BY created_at DESC`,
+      [tenantId, `%${query}%`]
+    );
+    
+    return result.rows.map(row => this.mapToReadModel(row));
+  }
+  
+  async findWithStats(
+    tenantId: string,
+    projectId: string
+  ): Promise<ProjectWithStats | null> {
+    // Complex query joining multiple tables
+    const projectResult = await this.db.query(
+      `SELECT * FROM projects_read_model
+       WHERE id = $1 AND tenant_id = $2`,
+      [projectId, tenantId]
+    );
+    
+    if (projectResult.rows.length === 0) {
+      return null;
+    }
+    
+    // Get detailed stats
+    const statsResult = await this.db.query(
+      `SELECT
+         COUNT(*) as total_tasks,
+         COUNT(*) FILTER (WHERE status = 'completed') as completed_tasks,
+         COUNT(*) FILTER (WHERE status = 'in_progress') as in_progress_tasks,
+         COUNT(*) FILTER (WHERE status = 'todo') as todo_tasks,
+         COUNT(*) FILTER (WHERE status != 'completed' AND due_date < NOW()) as overdue_tasks,
+         AVG(EXTRACT(EPOCH FROM (completed_at - created_at))/3600) as avg_completion_hours
+       FROM tasks
+       WHERE project_id = $1`,
+      [projectId]
+    );
+    
+    // Get budget usage
+    const budgetResult = await this.db.query(
+      `SELECT COALESCE(SUM(amount), 0) as budget_used
+       FROM project_expenses
+       WHERE project_id = $1`,
+      [projectId]
+    );
+    
+    // Get recent activity
+    const activityResult = await this.db.query(
+      `SELECT * FROM activities
+       WHERE entity_type = 'project'
+         AND entity_id = $1
+       ORDER BY created_at DESC
+       LIMIT 10`,
+      [projectId]
+    );
+    
+    // Get team members
+    const teamResult = await this.db.query(
+      `SELECT u.id, u.name, u.email, u.avatar_url, pm.role
+       FROM project_members pm
+       JOIN users u ON pm.user_id = u.id
+       WHERE pm.project_id = $1`,
+      [projectId]
+    );
+    
+    const project = this.mapToReadModel(projectResult.rows[0]);
+    const stats = statsResult.rows[0];
+    const budgetData = budgetResult.rows[0];
+    
+    return {
+      project,
+      stats: {
+        totalTasks: parseInt(stats.total_tasks),
+        completedTasks: parseInt(stats.completed_tasks),
+        inProgressTasks: parseInt(stats.in_progress_tasks),
+        todoTasks: parseInt(stats.todo_tasks),
+        overdueTasks: parseInt(stats.overdue_tasks),
+        avgTaskCompletionTime: parseFloat(stats.avg_completion_hours) || 0,
+        budgetUsed: parseFloat(budgetData.budget_used),
+        budgetRemaining: (project.budget || 0) - parseFloat(budgetData.budget_used)
+      },
+      recentActivity: activityResult.rows,
+      teamMembers: teamResult.rows
+    };
+  }
+  
+  async findDashboardData(tenantId: string): Promise<DashboardData> {
+    // Multiple queries for dashboard (could be one complex query)
+    const [countsResult, budgetResult, recentResult, statusResult, deadlinesResult] = await Promise.all([
+      // Project counts
+      this.db.query(
+        `SELECT
+           COUNT(*) as project_count,
+           COUNT(*) FILTER (WHERE status = 'active') as active_count,
+           COUNT(*) FILTER (WHERE status = 'completed') as completed_count,
+           COUNT(*) FILTER (WHERE is_overdue = true) as overdue_count
+         FROM projects_read_model
+         WHERE tenant_id = $1`,
+        [tenantId]
+      ),
+      
+      // Budget totals
+      this.db.query(
+        `SELECT
+           COALESCE(SUM(budget), 0) as total_budget,
+           COALESCE(SUM(pe.amount), 0) as total_used
+         FROM projects_read_model p
+         LEFT JOIN project_expenses pe ON p.id = pe.project_id
+         WHERE p.tenant_id = $1`,
+        [tenantId]
+      ),
+      
+      // Recent projects
+      this.db.query(
+        `SELECT * FROM projects_read_model
+         WHERE tenant_id = $1
+         ORDER BY created_at DESC
+         LIMIT 5`,
+        [tenantId]
+      ),
+      
+      // Projects by status
+      this.db.query(
+        `SELECT status, COUNT(*) as count
+         FROM projects_read_model
+         WHERE tenant_id = $1
+         GROUP BY status`,
+        [tenantId]
+      ),
+      
+      // Upcoming deadlines
+      this.db.query(
+        `SELECT id, name, end_date
+         FROM projects_read_model
+         WHERE tenant_id = $1
+           AND status = 'active'
+           AND end_date IS NOT NULL
+           AND end_date > NOW()
+           AND end_date < NOW() + INTERVAL '7 days'
+         ORDER BY end_date ASC`,
+        [tenantId]
+      )
+    ]);
+    
+    const counts = countsResult.rows[0];
+    const budget = budgetResult.rows[0];
+    
+    return {
+      projectCount: parseInt(counts.project_count),
+      activeProjectCount: parseInt(counts.active_count),
+      completedProjectCount: parseInt(counts.completed_count),
+      totalBudget: parseFloat(budget.total_budget),
+      totalBudgetUsed: parseFloat(budget.total_used),
+      overdueProjectCount: parseInt(counts.overdue_count),
+      recentProjects: recentResult.rows.map(row => this.mapToReadModel(row)),
+      projectsByStatus: statusResult.rows.map(row => ({
+        status: row.status,
+        count: parseInt(row.count)
+      })),
+      upcomingDeadlines: deadlinesResult.rows.map(row => ({
+        projectId: row.id,
+        projectName: row.name,
+        deadline: row.end_date
+      }))
+    };
+  }
+  
+  async findWithPagination(
+    tenantId: string,
+    page: number,
+    limit: number,
+    filters?: any
+  ): Promise<PaginatedResult<ProjectReadModel>> {
+    let whereClause = 'WHERE tenant_id = $1';
+    const params: any[] = [tenantId];
+    let paramIndex = 2;
+    
+    if (filters?.status) {
+      whereClause += ` AND status = $${paramIndex}`;
+      params.push(filters.status);
+      paramIndex++;
+    }
+    
+    if (filters?.search) {
+      whereClause += ` AND (name ILIKE $${paramIndex} OR description ILIKE $${paramIndex})`;
+      params.push(`%${filters.search}%`);
+      paramIndex++;
+    }
+    
+    // Count total
+    const countResult = await this.db.query(
+      `SELECT COUNT(*) FROM projects_read_model ${whereClause}`,
+      params
+    );
+    
+    // Get page
+    const offset = (page - 1) * limit;
+    const dataResult = await this.db.query(
+      `SELECT * FROM projects_read_model
+       ${whereClause}
+       ORDER BY created_at DESC
+       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
+      [...params, limit, offset]
+    );
+    
+    const total = parseInt(countResult.rows[0].count);
+    
+    return {
+      data: dataResult.rows.map(row => this.mapToReadModel(row)),
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit)
+    };
+  }
+  
+  async count(tenantId: string): Promise<number> {
+    const result = await this.db.query(
+      `SELECT COUNT(*) as count FROM projects_read_model
+       WHERE tenant_id = $1`,
+      [tenantId]
+    );
+    
+    return parseInt(result.rows[0].count);
+  }
+  
+  async countByStatus(tenantId: string): Promise<{ status: string; count: number }[]> {
+    const result = await this.db.query(
+      `SELECT status, COUNT(*) as count
+       FROM projects_read_model
+       WHERE tenant_id = $1
+       GROUP BY status
+       ORDER BY count DESC`,
+      [tenantId]
+    );
+    
+    return result.rows.map(row => ({
+      status: row.status,
+      count: parseInt(row.count)
+    }));
+  }
+  
+  async getTotalBudget(tenantId: string): Promise<number> {
+    const result = await this.db.query(
+      `SELECT COALESCE(SUM(budget), 0) as total
+       FROM projects_read_model
+       WHERE tenant_id = $1`,
+      [tenantId]
+    );
+    
+    return parseFloat(result.rows[0].total);
+  }
+  
+  private mapToReadModel(row: any): ProjectReadModel {
+    return {
+      id: row.id,
+      tenantId: row.tenant_id,
+      name: row.name,
+      description: row.description,
+      status: row.status,
+      budget: row.budget,
+      startDate: row.start_date,
+      endDate: row.end_date,
+      creatorName: row.creator_name,
+      creatorEmail: row.creator_email,
+      taskCount: row.task_count,
+      completedTaskCount: row.completed_task_count,
+      teamMemberCount: row.team_member_count,
+      completionPercentage: row.completion_percentage,
+      isOverdue: row.is_overdue,
+      daysRemaining: row.days_remaining,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+}
+```
+
+#### Step 5: Database Schema
+
+```sql
+-- Write model (normalized)
+CREATE TABLE projects (
+  id UUID PRIMARY KEY,
+  tenant_id UUID NOT NULL REFERENCES tenants(id),
+  name VARCHAR(255) NOT NULL,
+  description TEXT,
+  status VARCHAR(50) NOT NULL,
+  budget DECIMAL(15, 2),
+  start_date TIMESTAMP,
+  end_date TIMESTAMP,
+  created_by UUID NOT NULL REFERENCES users(id),
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  
+  CONSTRAINT check_status CHECK (status IN ('active', 'completed', 'archived'))
+);
+
+CREATE INDEX idx_projects_tenant ON projects(tenant_id);
+CREATE INDEX idx_projects_status ON projects(tenant_id, status);
+
+-- Read model (denormalized)
+CREATE TABLE projects_read_model (
+  id UUID PRIMARY KEY,
+  tenant_id UUID NOT NULL,
+  name VARCHAR(255) NOT NULL,
+  description TEXT,
+  status VARCHAR(50) NOT NULL,
+  budget DECIMAL(15, 2),
+  start_date TIMESTAMP,
+  end_date TIMESTAMP,
+  
+  -- Denormalized user data
+  creator_name VARCHAR(255),
+  creator_email VARCHAR(255),
+  
+  -- Denormalized stats
+  task_count INTEGER DEFAULT 0,
+  completed_task_count INTEGER DEFAULT 0,
+  team_member_count INTEGER DEFAULT 0,
+  
+  -- Computed fields
+  completion_percentage INTEGER DEFAULT 0,
+  is_overdue BOOLEAN DEFAULT FALSE,
+  days_remaining INTEGER,
+  
+  created_at TIMESTAMP NOT NULL,
+  updated_at TIMESTAMP NOT NULL
+);
+
+CREATE INDEX idx_projects_read_tenant ON projects_read_model(tenant_id);
+CREATE INDEX idx_projects_read_status ON projects_read_model(tenant_id, status);
+CREATE INDEX idx_projects_read_overdue ON projects_read_model(tenant_id, is_overdue);
+CREATE INDEX idx_projects_read_search ON projects_read_model 
+  USING gin(to_tsvector('english', name || ' ' || description));
+
+-- Aggregate table
+CREATE TABLE tenant_project_stats (
+  tenant_id UUID PRIMARY KEY REFERENCES tenants(id),
+  project_count INTEGER DEFAULT 0,
+  active_project_count INTEGER DEFAULT 0,
+  completed_project_count INTEGER DEFAULT 0,
+  total_budget DECIMAL(20, 2) DEFAULT 0,
+  last_updated TIMESTAMP NOT NULL DEFAULT NOW()
+);
+```
+
+#### Step 6: Using Read/Write Repositories in Service
+
+```typescript
+// application/services/ProjectService.ts
+export class ProjectService {
+  constructor(
+    private writeRepo: IProjectWriteRepository,
+    private readRepo: IProjectReadRepository,
+    private eventBus: IEventBus
+  ) {}
+  
+  // Command - uses write repository
+  async createProject(
+    tenantId: string,
+    userId: string,
+    data: CreateProjectDTO
+  ): Promise<ProjectReadModel> {
+    // Create domain entity
+    const project = new Project(
+      uuid(),
+      tenantId,
+      data.name,
+      data.description,
+      'active',
+      data.budget || null,
+      data.startDate || null,
+      data.endDate || null,
+      userId,
+      new Date(),
+      new Date()
+    );
+    
+    // Write to database
+    await this.writeRepo.update(project);
+    
+    // Emit event
+    await this.eventBus.emit('project.updated', {
+      tenantId,
+      projectId,
+      updates
+    });
+    
+    // Return read model
+    const readModel = await this.readRepo.findById(tenantId, projectId);
+    if (!readModel) {
+      throw new Error('Failed to read updated project');
+    }
+    
+    return readModel;
+  }
+  
+  // Command - uses write repository
+  async deleteProject(tenantId: string, projectId: string): Promise<void> {
+    const deleted = await this.writeRepo.delete(tenantId, projectId);
+    
+    if (!deleted) {
+      throw new Error('Project not found');
+    }
+    
+    await this.eventBus.emit('project.deleted', {
+      tenantId,
+      projectId
+    });
+  }
+  
+  // Query - uses read repository
+  async getProject(tenantId: string, projectId: string): Promise<ProjectReadModel> {
+    const project = await this.readRepo.findById(tenantId, projectId);
+    
+    if (!project) {
+      throw new Error('Project not found');
+    }
+    
+    return project;
+  }
+  
+  // Query - uses read repository
+  async getProjectWithStats(
+    tenantId: string,
+    projectId: string
+  ): Promise<ProjectWithStats> {
+    const projectWithStats = await this.readRepo.findWithStats(tenantId, projectId);
+    
+    if (!projectWithStats) {
+      throw new Error('Project not found');
+    }
+    
+    return projectWithStats;
+  }
+  
+  // Query - uses read repository
+  async listProjects(
+    tenantId: string,
+    options: {
+      page?: number;
+      limit?: number;
+      status?: string;
+      search?: string;
+    } = {}
+  ): Promise<PaginatedResult<ProjectReadModel>> {
+    const page = options.page || 1;
+    const limit = options.limit || 20;
+    
+    return this.readRepo.findWithPagination(tenantId, page, limit, {
+      status: options.status,
+      search: options.search
+    });
+  }
+  
+  // Query - uses read repository
+  async searchProjects(tenantId: string, query: string): Promise<ProjectReadModel[]> {
+    return this.readRepo.search(tenantId, query);
+  }
+  
+  // Query - uses read repository
+  async getDashboard(tenantId: string): Promise<DashboardData> {
+    return this.readRepo.findDashboardData(tenantId);
+  }
+  
+  // Query - uses read repository
+  async getProjectsByStatus(tenantId: string, status: string): Promise<ProjectReadModel[]> {
+    return this.readRepo.findByStatus(tenantId, status);
+  }
+}
+```
+
+***
+
+### Advanced: Background Synchronization
+
+For true CQRS with separate databases, use background sync:
+
+```typescript
+// infrastructure/sync/ReadModelSynchronizer.ts
+export class ReadModelSynchronizer {
+  constructor(
+    private eventBus: IEventBus,
+    private readRepo: IProjectReadRepository
+  ) {
+    this.setupEventHandlers();
+  }
+  
+  private setupEventHandlers(): void {
+    // Listen to domain events and update read model
+    
+    this.eventBus.on('project.created', async (event) => {
+      // Read model is already updated in write repository
+      // But if using separate database, update here:
+      // await this.readRepo.updateFromEvent(event);
+      console.log('Read model synchronized for project.created');
+    });
+    
+    this.eventBus.on('project.updated', async (event) => {
+      // Update read model
+      console.log('Read model synchronized for project.updated');
+    });
+    
+    this.eventBus.on('task.completed', async (event) => {
+      // Update project stats in read model
+      await this.updateProjectTaskStats(event.projectId);
+    });
+    
+    this.eventBus.on('team_member.added', async (event) => {
+      // Update team member count in read model
+      await this.updateProjectTeamCount(event.projectId);
+    });
+  }
+  
+  private async updateProjectTaskStats(projectId: string): Promise<void> {
+    // Recalculate task statistics and update read model
+    // This keeps denormalized data in sync
+  }
+  
+  private async updateProjectTeamCount(projectId: string): Promise<void> {
+    // Recalculate team member count and update read model
+  }
+}
+```
+
+***
+
+### Benefits of Read/Write Separation
+
+#### Performance Benefits
+
+**Read Performance:**
+
+```
+Without separation:
+- Complex JOIN on 5 tables: 200ms
+- Must compute aggregates: +50ms
+- Total: 250ms per request
+
+With separation:
+- Simple SELECT from denormalized table: 5ms
+- Pre-computed aggregates: 0ms
+- Total: 5ms per request
+- 50x faster!
+```
+
+**Write Performance:**
+
+```
+Without separation:
+- Update normalized data: 20ms
+- Update aggregates: 10ms
+- Total: 30ms
+
+With separation:
+- Update normalized data: 20ms
+- Update read model (async): 15ms
+- Total: 35ms (slightly slower, but acceptable)
+- Reads are 50x faster, so overall better
+```
+
+#### Scalability Benefits
+
+```
+Traditional:
+- 1 database serves reads and writes
+- Reads (90% traffic) compete with writes
+- Database becomes bottleneck
+
+Read/Write Separation:
+- Write database: Optimized for writes (SSD, high IOPS)
+- Read database: Optimized for reads (can be replica, cached)
+- Can add read replicas easily
+- Scale reads independently from writes
+```
+
+***
+
+### When to Use Read/Write Separation
+
+#### ✅ Use When:
+
+1. **High Read/Write Ratio**
+
+   * 90%+ reads, <10% writes
+   * Dashboard-heavy applications
+   * Reporting systems
+
+2. **Complex Read Queries**
+
+   * Multiple JOINs
+   * Heavy aggregations
+   * Real-time dashboards
+
+3. **Different Scaling Needs**
+
+   * Reads need to scale horizontally
+   * Writes need transactional guarantees
+
+4. **Performance Critical**
+
+   * Sub-second response times required
+   * High traffic (1000+ req/sec)
+
+#### ❌ Don't Use When:
+
+1. **Simple CRUD**
+
+   * No complex queries
+   * Simple data model
+   * Low traffic
+
+2. **Immediate Consistency Required**
+
+   * Financial transactions
+   * Inventory management
+   * Real-time bidding
+
+3. **Small Team**
+
+   * Added complexity
+   * More code to maintain
+   * Increased testing burden
+
+4. **Early Stage MVP**
+
+   * Premature optimization
+   * Start simple, add later if needed
+
+***
+
+### Eventual Consistency Considerations
+
+#### The Challenge
+
+With read/write separation, there's a delay between write and read:
+
+```typescript
+// Write
+await writeRepo.create(project);
+
+// Read immediately
+const project = await readRepo.findById(projectId);
+// Might not be there yet if async sync!
+```
+
+#### Solution 1: Synchronous Updates
+
+Update both models in same transaction (what we did above):
+
+```typescript
+async create(project: Project): Promise<Project> {
+  await client.query('BEGIN');
+  
+  // Update write model
+  await client.query('INSERT INTO projects...');
+  
+  // Update read model (same transaction)
+  await client.query('INSERT INTO projects_read_model...');
+  
+  await client.query('COMMIT');
+}
+```
+
+**Pros:** Immediate consistency\
+**Cons:** Slower writes, tight coupling
+
+#### Solution 2: Return Write Model
+
+Return data from write operation:
+
+```typescript
+async createProject(data): Promise<ProjectReadModel> {
+  // Write
+  const project = await writeRepo.create(data);
+  
+  // Convert write model to read model
+  return this.toReadModel(project);
+  // Don't wait for read model to update
+}
+```
+
+**Pros:** Fast, no waiting\
+**Cons:** Returned data might differ from subsequent reads
+
+#### Solution 3: Eventual Consistency with Polling
+
+Accept eventual consistency, retry if needed:
+
+```typescript
+async createProjectWithRetry(data): Promise<ProjectReadModel> {
+  // Write
+  const project = await writeRepo.create(data);
+  
+  // Poll read model until available
+  for (let i = 0; i < 10; i++) {
+    const readModel = await readRepo.findById(project.id);
+    if (readModel) {
+      return readModel;
+    }
+    await sleep(100); // Wait 100ms
+  }
+  
+  throw new Error('Read model not synchronized');
+}
+```
+
+**Pros:** Eventually consistent\
+**Cons:** Added latency, complexity
+
+***
+
+### Real-World Example: E-commerce Order
+
+```typescript
+// Write Model (Normalized)
+class Order {
+  id: string;
+  customerId: string;
+  status: string;
+  createdAt: Date;
+}
+
+class OrderItem {
+  id: string;
+  orderId: string;
+  productId: string;
+  quantity: number;
+  price: number;
+}
+
+// Read Model (Denormalized)
+interface OrderReadModel {
+  id: string;
+  customerId: string;
+  customerName: string;
+  customerEmail: string;
+  status: string;
+  
+  // Denormalized items
+  items: {
+    productId: string;
+    productName: string;
+    productImage: string;
+    quantity: number;
+    price: number;
+    subtotal: number;
+  }[];
+  
+  // Computed fields
+  itemCount: number;
+  subtotal: number;
+  tax: number;
+  shipping: number;
+  total: number;
+  
+  // Timestamps
+  createdAt: Date;
+  estimatedDelivery: Date;
+}
+
+// Write Repository
+class OrderWriteRepository {
+  async create(order: Order, items: OrderItem[]): Promise<Order> {
+    await db.transaction(async (tx) => {
+      // Insert order
+      await tx.query('INSERT INTO orders...');
+      
+      // Insert items
+      for (const item of items) {
+        await tx.query('INSERT INTO order_items...');
+      }
+      
+      // Update read model
+      await this.updateOrderReadModel(tx, order.id);
+    });
+    
+    return order;
+  }
+  
+  private async updateOrderReadModel(tx, orderId): Promise<void> {
+    // Join all necessary tables
+    const data = await tx.query(`
+      SELECT 
+        o.id, o.customer_id, o.status, o.created_at,
+        c.name as customer_name, c.email as customer_email,
+        json_agg(json_build_object(
+          'productId', oi.product_id,
+          'productName', p.name,
+          'productImage', p.image_url,
+          'quantity', oi.quantity,
+          'price', oi.price,
+          'subtotal', oi.quantity * oi.price
+        )) as items
+      FROM orders o
+      JOIN customers c ON o.customer_id = c.id
+      JOIN order_items oi ON o.id = oi.order_id
+      JOIN products p ON oi.product_id = p.id
+      WHERE o.id = $1
+      GROUP BY o.id, c.name, c.email
+    `, [orderId]);
+    
+    const orderData = data.rows[0];
+    
+    // Calculate totals
+    const itemsData = JSON.parse(orderData.items);
+    const subtotal = itemsData.reduce((sum, item) => sum + item.subtotal, 0);
+    const tax = subtotal * 0.1; // 10% tax
+    const shipping = subtotal > 100 ? 0 : 10; // Free shipping over $100
+    const total = subtotal + tax + shipping;
+    
+    // Insert/update read model
+    await tx.query(`
+      INSERT INTO orders_read_model (
+        id, customer_id, customer_name, customer_email,
+        status, items, item_count, subtotal, tax, shipping, total,
+        created_at, estimated_delivery
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      ON CONFLICT (id) DO UPDATE SET
+        status = $5, items = $6, item_count = $7,
+        subtotal = $8, tax = $9, shipping = $10, total = $11
+    `, [
+      orderData.id,
+      orderData.customer_id,
+      orderData.customer_name,
+      orderData.customer_email,
+      orderData.status,
+      JSON.stringify(itemsData),
+      itemsData.length,
+      subtotal,
+      tax,
+      shipping,
+      total,
+      orderData.created_at,
+      new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) // 7 days
+    ]);
+  }
+}
+
+// Read Repository
+class OrderReadRepository {
+  async findById(orderId: string): Promise<OrderReadModel> {
+    // Simple, fast query from denormalized table
+    const result = await db.query(
+      'SELECT * FROM orders_read_model WHERE id = $1',
+      [orderId]
+    );
+    
+    return result.rows[0];
+  }
+  
+  async findCustomerOrders(customerId: string): Promise<OrderReadModel[]> {
+    // Fast query, no JOINs needed
+    const result = await db.query(
+      'SELECT * FROM orders_read_model WHERE customer_id = $1 ORDER BY created_at DESC',
+      [customerId]
+    );
+    
+    return result.rows;
+  }
+}
+```
+
+***
+
+### Migration Strategy
+
+#### Step 1: Start with Single Repository
+
+```typescript
+// Initial implementation
+class ProjectRepository {
+  async findById(id): Promise<Project> { }
+  async save(project): Promise<Project> { }
+}
+```
+
+#### Step 2: Identify Read/Write Split
+
+```typescript
+// Split into interfaces
+interface IProjectReadRepository { }
+interface IProjectWriteRepository { }
+
+// Same implementation class implements both
+class ProjectRepository implements IProjectReadRepository, IProjectWriteRepository {
+  // All methods
+}
+```
+
+#### Step 3: Create Read Model Table
+
+```sql
+-- Add denormalized read table
+CREATE TABLE projects_read_model AS
+SELECT 
+  p.*,
+  u.name as creator_name,
+  COUNT(t.id) as task_count
+FROM projects p
+JOIN users u ON p.created_by = u.id
+LEFT JOIN tasks t ON t.project_id = p.id
+GROUP BY p.id, u.name;
+```
+
+#### Step 4: Separate Implementations
+
+```typescript
+// Separate classes
+class ProjectWriteRepository implements IProjectWriteRepository {
+  // Write operations + update read model
+}
+
+class ProjectReadRepository implements IProjectReadRepository {
+  // Read from denormalized table
+}
+```
+
+#### Step 5: Update Service
+
+```typescript
+// Use both repositories
+class ProjectService {
+  constructor(
+    private writeRepo: IProjectWriteRepository,
+    private readRepo: IProjectReadRepository
+  ) {}
+}
+```
+
+***
+
+### Summary
+
+#### Key Takeaways
+
+**Read/Write Separation (CQRS-Lite):**
+
+* Separate repositories for reads and writes
+* Denormalized read models for performance
+* Optimized queries for each side
+* 10-50x performance improvement for reads
+
+**When to Use:**
+
+* High read/write ratio (90/10)
+* Complex read queries
+* Performance critical
+* Need to scale reads independently
+
+**Trade-offs:**
+
+* More complex code
+* Potential eventual consistency
+* More storage (duplicated data)
+* Worth it for high-traffic SaaS
+
+**Implementation:**
+
+* Same database (CQRS-Lite) or separate databases (full CQRS)
+* Synchronous updates (immediate consistency)
+* Async updates (eventual consistency)
+* Event-driven sync (most flexible)
+
+***
