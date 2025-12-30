@@ -6,33 +6,33 @@ This is THE architectural decision that impacts everything else. Let's be clear 
 
 #### What is a Monolith?
 
-A **monolithic application** is a single, tightly coupled unified codebase where all functionality is deployed together as one unit. 
+A **monolithic application** is a single, tightly coupled unified codebase where all functionality is deployed together as one unit.
 
 ```
 Monolithic Application
 ┌───────────────────────────────────────┐
-│                                     		   	│
-│  ┌──────────┐  ┌──────────┐       	   	│
-│  │   API    	│  	│   Web    	 │       		│
-│  │  Layer   	│  	│   UI    	 │       		│
-│  └────┬─────┘  └─┬────────┘       		│
-│        │            │              			│
-│  ┌────┴──────────┴───────┐   	   		│
+│                                     	│
+│  ┌──────────┐  ┌──────────┐       	  │
+│  │   API    │  │   Web 	  │       		│
+│  │  Layer  	│	 │   UI    	│       		│
+│  └────┬─────┘  └─────┬────┘       		│
+│       │              │              	│
+│  ┌────┴──────────────┴────┐   	   		│
 │  │   Business Logic   		│      			│
-│  │   - Auth                 	│      			│
-│  │   - Projects             	│      			│
-│  │   - Tasks                	│      			│
-│  │   - Billing              	│      			│
-│  └──────────┬────────────┘	      		│
-│             	│                       		│
+│  │   - Auth               │      			│
+│  │   - Projects           │      			│
+│  │   - Tasks              │      			│
+│  │   - Billing            │      			│
+│  └──────────┬─────────────┘	      		│
+│             │                       	│
 │  ┌──────────┴───────────────┐      		│
-│  │   Data Access Layer      		│   		│
+│  │   Data Access Layer      │   		  │
 │  └──────────┬───────────────┘      		│
-│            	 │                       		│
+│            	│                       	│
 └─────────────┼─────────────────────────┘
-				│
-        ┌──────┴──────┐
-        │ Database  	 │
+				      │
+        ┌─────┴───────┐
+        │ Database  	│
         └─────────────┘
 ```
 
@@ -49,21 +49,21 @@ async function createProject(tenantId, userId, projectData) {
   const project = await db.projects.create({
     ...projectData,
     tenantId,
-    createdBy: userId
+    createdBy: userId,
   });
-  
+
   await db.activities.create({
     tenantId,
-    type: 'project_created',
+    type: "project_created",
     projectId: project.id,
-    userId
+    userId,
   });
-  
+
   await notificationService.notify(tenantId, {
-    type: 'project_created',
-    projectId: project.id
+    type: "project_created",
+    projectId: project.id,
   });
-  
+
   return project;
 }
 
@@ -73,28 +73,28 @@ async function createProject(tenantId, userId, projectData) {
   const project = await projectsServiceClient.create({
     ...projectData,
     tenantId,
-    createdBy: userId
+    createdBy: userId,
   });
-  
+
   // 2. Call Activity Service
   await activityServiceClient.create({
     tenantId,
-    type: 'project_created',
+    type: "project_created",
     projectId: project.id,
-    userId
+    userId,
   });
-  
+
   // 3. Publish event to message queue
-  await messageQueue.publish('project.created', {
+  await messageQueue.publish("project.created", {
     tenantId,
-    projectId: project.id
+    projectId: project.id,
   });
-  
+
   // 4. Handle potential failures and retries
   // What if activity service fails?
   // What if notification service is down?
   // Need distributed transaction handling
-  
+
   return project;
 }
 ```
@@ -115,23 +115,19 @@ async function createProject(tenantId, userId, projectData) {
 async function transferFunds(fromAccount, toAccount, amount) {
   await db.transaction(async (trx) => {
     // Debit from account
-    await trx('accounts')
-      .where('id', fromAccount)
-      .decrement('balance', amount);
-    
+    await trx("accounts").where("id", fromAccount).decrement("balance", amount);
+
     // Credit to account
-    await trx('accounts')
-      .where('id', toAccount)
-      .increment('balance', amount);
-    
+    await trx("accounts").where("id", toAccount).increment("balance", amount);
+
     // Log transaction
-    await trx('transactions').insert({
+    await trx("transactions").insert({
       fromAccount,
       toAccount,
       amount,
-      timestamp: new Date()
+      timestamp: new Date(),
     });
-    
+
     // If any step fails, entire transaction rolls back
   });
 }
@@ -143,6 +139,7 @@ async function transferFunds(fromAccount, toAccount, amount) {
 **Reason 4: You Don't Have Microservice Problems Yet**
 
 Microservices solve specific problems:
+
 - ✅ Different parts need to scale independently
 - ✅ Different teams working on different services
 - ✅ Need to deploy parts independently
@@ -210,27 +207,27 @@ src/
 // In projects/services/ProjectService.js
 async function createProject(data) {
   const project = await db.projects.create(data);
-  
+
   // DON'T DO THIS - directly accessing another module's database
   await db.notifications.create({
-    type: 'project_created',
-    projectId: project.id
+    type: "project_created",
+    projectId: project.id,
   });
 }
 
 // ✅ GOOD: Use the other module's public API
 // In projects/services/ProjectService.js
-const { notificationService } = require('../../notifications');
+const { notificationService } = require("../../notifications");
 
 async function createProject(data) {
   const project = await db.projects.create(data);
-  
+
   // Use notification module's service (public API)
   await notificationService.send({
-    type: 'project_created',
-    projectId: project.id
+    type: "project_created",
+    projectId: project.id,
   });
-  
+
   return project;
 }
 ```
@@ -284,6 +281,7 @@ You should consider splitting into microservices when:
 #### Signal 1: Team Scaling Issues
 
 **Scenario:** Many teams and they are stepping on each other's toes:
+
 - Merge conflicts constantly
 - Can't deploy without coordinating with 5 teams
 - Changes in one area break another team's code
@@ -305,6 +303,7 @@ Your App:
 With a monolith, you'd need 10 servers of EVERYTHING just to handle image processing.
 
 With microservices:
+
 - API: 2 servers
 - Background Jobs: 1 server
 - WebSocket: 5 servers
@@ -315,6 +314,7 @@ With microservices:
 #### Signal 3: Technology Heterogeneity
 
 **Scenario:** Different parts need different technologies:
+
 - Main app: Node.js (great for APIs)
 - ML model serving: Python (TensorFlow)
 - Real-time analytics: Go (high performance)
@@ -323,6 +323,7 @@ With microservices:
 #### Signal 4: Independent Deployment
 
 **Scenario:** You need to deploy parts independently:
+
 - Payment service must have 99.99% uptime
 - Experimental features can have downtime
 - Different release cycles for different features
@@ -338,6 +339,7 @@ With microservices:
 When you DO need to split, do it gradually:
 
 #### Phase 1: Start Modular
+
 ```
 Monolithic Application (Well-Structured)
 ├── Auth Module
@@ -403,33 +405,34 @@ Before you jump to microservices, understand what you're signing up for:
 
 **1. Distributed System Complexity**
 
+In distributed system, ACID transactions don't work. The programmer is responsible for writing the custom code to track the request, synchronize services and manually undo previous steps if something goes wrong later in the chain.
+
 ```javascript
 // Simple in monolith
 async function createOrder(customerId, items) {
   await db.transaction(async (trx) => {
-    const order = await trx('orders').insert({ customerId });
-    await trx('items').insert(items.map(i => ({ ...i, orderId: order.id })));
-    await trx('customers').where('id', customerId).increment('order_count');
+    const order = await trx("orders").insert({ customerId });
+    await trx("items").insert(items.map((i) => ({ ...i, orderId: order.id })));
+    await trx("customers").where("id", customerId).increment("order_count");
   });
 }
 
 // Complex in microservices (Saga pattern needed)
 async function createOrder(customerId, items) {
   const sagaId = uuid();
-  
+
   try {
     // Step 1: Create order
     const order = await orderService.create({ customerId }, sagaId);
-    
+
     // Step 2: Reserve inventory
     await inventoryService.reserve(items, sagaId);
-    
+
     // Step 3: Process payment
     await paymentService.charge(customerId, order.total, sagaId);
-    
+
     // Step 4: Update customer stats
     await customerService.incrementOrderCount(customerId, sagaId);
-    
   } catch (error) {
     // COMPENSATING TRANSACTIONS (undo everything)
     await orderService.cancel(order.id, sagaId);
@@ -442,14 +445,14 @@ async function createOrder(customerId, items) {
 
 **2. Operational Overhead**
 
-| Aspect | Monolith | 10 Microservices |
-|--------|----------|------------------|
-| **Deployment** | 1 pipeline | 10 pipelines |
-| **Monitoring** | 1 dashboard | 10+ dashboards |
-| **Logging** | 1 log stream | 10 log streams (need correlation) |
-| **Debugging** | Stack trace in 1 place | Distributed tracing needed |
-| **Testing** | Integration tests | Contract tests, integration, E2E |
-| **Infrastructure** | 2-3 servers | 20+ servers (each service needs redundancy) |
+| Aspect             | Monolith               | 10 Microservices                            |
+| ------------------ | ---------------------- | ------------------------------------------- |
+| **Deployment**     | 1 pipeline             | 10 pipelines                                |
+| **Monitoring**     | 1 dashboard            | 10+ dashboards                              |
+| **Logging**        | 1 log stream           | 10 log streams (need correlation)           |
+| **Debugging**      | Stack trace in 1 place | Distributed tracing needed                  |
+| **Testing**        | Integration tests      | Contract tests, integration, E2E            |
+| **Infrastructure** | 2-3 servers            | 20+ servers (each service needs redundancy) |
 
 **3. Network Calls Replace Function Calls**
 
@@ -476,6 +479,7 @@ WHERE p.tenant_id = ?
 ```
 
 In microservices, you need:
+
 - Multiple API calls
 - Data denormalization
 - Eventual consistency
@@ -493,27 +497,27 @@ Start Here
 Do you have < 10 engineers?
     ↓ YES
 Use Monolith ✅
-    
+
     ↓ NO
 Do all parts of your app scale similarly?
     ↓ YES
 Use Monolith ✅
-    
+
     ↓ NO
 Can you handle distributed system complexity?
     ↓ NO
 Use Monolith ✅
-    
+
     ↓ YES
 Do you have dedicated DevOps team?
     ↓ NO
 Use Monolith ✅
-    
+
     ↓ YES
 Are you comfortable with eventual consistency?
     ↓ NO
 Use Monolith ✅
-    
+
     ↓ YES
 Consider Microservices ⚠️
 (but start with modular monolith anyway!)
@@ -526,20 +530,26 @@ Consider Microservices ⚠️
 Based on the above analysis:
 
 #### Java Project (EnterpriseFlow): Modular Monolith
+
 **Rationale:**
+
 - Complex business logic benefits from transactions
 - Starting with small team
 - Can split later if needed
 - Spring Boot makes modular monoliths easy
 
 #### Node.js Project (CollabSpace): Modular Monolith with Service Extraction
+
 **Rationale:**
+
 - Most features in monolith
 - WebSocket server might be separate service (different scaling)
 - Real-time features benefit from isolated deployment
 
 #### Go Project (ApiCore): Monolith Initially, Microservices-Ready
+
 **Rationale:**
+
 - High-performance requirements
 - Go makes microservices easy (small binaries, fast startup)
 - Will demonstrate migration path to microservices
