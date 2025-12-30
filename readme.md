@@ -1,60 +1,64 @@
-# 🚀 SaaS Blueprint : L'Art de Bâtir du Robuste & Performant
+# 🚀 SaaS Blueprint: The Art of Building Robust & High-Performance Systems
 
-Bienvenue dans ce dépôt dédié à la recherche et à l'ingénierie des applications SaaS (Software as a Service). Ce projet est une compilation structurée de définitions, de concepts architecturaux, de sources de référence et d'exemples concrets pour concevoir des produits capables de passer à l'échelle.
+Welcome to this repository dedicated to research and engineering for SaaS (Software as a Service) applications. This project is a structured compilation of definitions, architectural concepts, reference sources, and concrete examples designed to build products capable of scaling.
 
-> Note aux lecteurs : Ce dépôt est un travail en cours. Seuls les chapitres de la branche main sont finalisé, tandis que les autres 📝 sont en phase de rédaction sur la branche drafts.
-
----
-
-## 🎯 Vue d'ensemble (Overview)
-
-- **Public visé :** Développeurs de niveau intermédiaire possédant déjà une expérience en développement web.
-- **Objectif :** Fournir les clés pour bâtir des applications SaaS "production-ready", capables de gérer des flux de données intensifs et de passer d'un socle de quelques milliers d'utilisateurs à une échelle de plusieurs millions.
-
-### 💻 Trois Projets Parallèles
-
-Pour illustrer la théorie, les recherches sont appliquées à travers trois implémentations distinctes :
-
-1.  ☕ **Java / Spring Boot :** Focus sur les applications "Enterprise-grade" et les transactions complexes.
-2.  🚀 **Node.js :** Focus sur le temps réel (real-time) et les architectures orientées événements.
-3.  🐹 **Go (Golang) :** Focus sur la haute performance et le traitement concurrent.
+> **Note to readers:** This repository is a work in progress. Only the chapters in the `main` branch are finalized, while those marked with 📝 are currently in the drafting phase on the `drafts` branch.
 
 ---
 
-## 🏗️ Ce que vous trouverez ici
+## 🎯 Overview
 
-L'objectif est de couvrir le cycle de vie complet d'un SaaS, de la première ligne de code à l'infrastructure mondiale.
+- **Target Audience:** Intermediate-level developers with prior experience in web development.
+- **Objective:** To provide the keys to building "production-ready" SaaS applications capable of handling intensive data flows and scaling from a few thousand users to several million.
 
-1. Théorie et concept
+### 💻 Three Parallel Projects
 
-   1. Fondations & Architecture
+To illustrate the theory, the research is applied through three distinct implementations:
 
-   - Concepts : Multi-tenancy (isolation des données), microservices vs monolithe modulaire.
-   - Performance : Stratégies de mise en cache, optimisation des requêtes DB.
-   - Robustesse : Gestion des erreurs, circuits-breakers et haute disponibilité.
+1. ☕ **Java / Spring Boot:** Focused on "Enterprise-grade" applications and complex transactions.
+2. 🚀 **Node.js:** Focused on real-time features and event-driven architectures.
+3. 🐹 **Go (Golang):** Focused on high performance and concurrent processing.
 
-   2. Stack Technique & Scalabilité
+---
 
-   - Frontend : Frameworks modernes et SSR/ISR pour le SEO.
-   - Backend : API Design (REST, GraphQL, gRPC) et State Management.
-   - DevOps : CI/CD, Observabilité (Logs, Metrics, Tracing) et Infrastructure as Code.
+## 🏗️ What You Will Find Here
 
-   3. Business & Opérations
+The goal is to cover the complete SaaS lifecycle, from the first line of code to global infrastructure.
 
-   - Monétisation : Modèles de pricing (Seat-based, Usage-based) et intégration Stripe.
-   - Sécurité : RGPD, conformité SOC2, authentification (OAuth2, WebAuthn).📊
+### 1. Theory and Concepts
 
-2. Mise en Pratique (Exemples)
-   Extraits de code concrets, schémas de base de données et configurations d'infrastructure appliqués à **Java**, **Node.js** et **Go**.
+#### 1. Foundations & Architecture
 
-3. Ressources de Référence (Bibliographie)
-   Pour chaque sujet, une sélection rigoureuse de sources externes pour approfondir :
+- **Concepts:** Multi-tenancy (data isolation), microservices vs. modular monoliths.
+- **Performance:** Caching strategies, DB query optimization.
+- **Robustness:** Error handling, circuit breakers, and high availability.
 
-- **Articles & White Papers :** Analyses techniques issues des blogs d'ingénierie (Netflix, Uber, Airbnb, Cloudflare).
-- **Livres :** Références incontournables sur l'architecture logicielle et la scalabilité.
-- **Sites Web & Docs :** Documentation officielle, outils de benchmark et plateformes de veille technologique.
+#### 2. Tech Stack & Scalability
 
-## Comment utiliser ce dépôt ?
+- **Frontend:** Modern frameworks and SSR/ISR for SEO optimization.
+- **Backend:** API Design (REST, GraphQL, gRPC) and State Management.
+- **DevOps:** CI/CD, Observability (Logs, Metrics, Tracing), and Infrastructure as Code.
 
-- Exploration : Parcourez les dossiers phase\_\* pour accéder aux fiches détaillées.
-- Parcourez le fichier structure.md pour avoir une vu d'ensemble du projet et connaitre ce qui est à venir
+#### 3. Business & Operations
+
+- **Monetization:** Pricing models (Seat-based, Usage-based) and Stripe integration.
+- **Security:** GDPR, SOC2 compliance, and authentication (OAuth2, WebAuthn). 📊
+
+### 2. Practical Implementation (Examples)
+
+Concrete code snippets, database schemas, and infrastructure configurations applied to **Java**, **Node.js**, and **Go**.
+
+### 3. Reference Resources (Bibliography)
+
+For each topic, a rigorous selection of external sources for deeper learning:
+
+- **Articles & White Papers:** Technical analyses from top-tier engineering blogs (Netflix, Uber, Airbnb, Cloudflare).
+- **Books:** Essential references on software architecture and scalability.
+- **Websites & Docs:** Official documentation, benchmarking tools, and tech monitoring platforms.
+
+---
+
+## How to Use This Repository?
+
+- **Exploration:** Browse the `phase_*` folders to access detailed technical sheets.
+- **Roadmap:** Review the `structure.md` file to get an overview of the project and see what's coming next.
