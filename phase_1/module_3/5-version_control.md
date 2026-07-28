@@ -1872,15 +1872,9 @@ git status
 // src/services/payment.service.ts
 export class PaymentService {
   async processPayment(amount: number) {
-<<<<<<< HEAD (Current changes - your branch)
-    // Your implementation
-    const result = await this.stripe.createPayment(amount);
-    return { success: true, transactionId: result.id };
-=======
     // Their implementation
     const payment = await this.stripeClient.process(amount);
-    return { status: 'success', id: payment.paymentId };
->>>>>>> feature/payment-integration (Incoming changes)
+    return { status: "success", id: payment.paymentId };
   }
 }
 ```
