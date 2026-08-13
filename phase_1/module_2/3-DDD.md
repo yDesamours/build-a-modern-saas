@@ -82,7 +82,7 @@ This directly follows from the previous section: if "Ubiquitous Language" only m
 ┌─────────────────────────┐
 │  Catalog Context        		│
 │  - Product              		│  "Product" means catalog item
-│  - Category             		│  with description, images
+│  - Category             		│  with description, price
 │  - Price                		│
 └─────────────────────────┘
 
