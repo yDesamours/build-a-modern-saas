@@ -13,10 +13,8 @@ Domain-Driven Design is an approach to software development that focuses on the 
 
 Before diving into concepts, it helps to know that DDD is really made of two halves, and this chapter is organized around that split:
 
-- **Strategic DDD** is about *deciding where the boundaries go*: what is the domain, how it splits into subdomains, where one Bounded Context ends and another begins, and how those contexts talk to each other.
-- **Tactical DDD** is about *how you design and code inside one boundary*: Entities, Value Objects, Aggregates, Domain Services, Domain Events, Repositories.
-
-Most tutorials jump straight to the tactical patterns because they look like familiar object-oriented code. But the strategic half is what makes DDD different from "just good OOP" — it's the part that deals with language, meaning, and team boundaries, not just class design. Keep this distinction in mind: everything in **Part 1** is strategic, everything in **Part 2** is tactical.
+- **Strategic DDD** is about _deciding where the boundaries go_: what is the domain, how it splits into subdomains, where one Bounded Context ends and another begins, and how those contexts talk to each other.
+- **Tactical DDD** is about _how you design and code inside one boundary_: Entities, Value Objects, Aggregates, Domain Services, Domain Events, Repositories.
 
 ---
 
@@ -56,7 +54,7 @@ DOMAIN: E-Commerce Platform
 **The idea**
 
 - A **domain** is divided into subdomains.
-- **Core subdomains** relate to the strategic value of the business — this is where you compete, and where investing in DDD pays off the most.
+- **Core subdomains** relate to the strategic value of the business. This is what the business does.
 - **Supporting subdomains** are non-strategic but are business-related parts that assist the core subdomains.
 - **Generic subdomains** are common across many systems and are not specific to this business — they're good candidates for off-the-shelf solutions rather than custom modeling.
 
@@ -76,7 +74,7 @@ Why this matters:
 
 A **bounded context** is a logical boundary within which a particular domain model, and a particular Ubiquitous Language, applies.
 
-This directly follows from the previous section: if "Ubiquitous Language" only means the language is consistent *within* a boundary, then different boundaries are free — and expected — to use the same word with different meanings, because each one is home to its own Ubiquitous Language.
+This directly follows from the previous section: if "Ubiquitous Language" only means the language is consistent _within_ a boundary, then different boundaries are free — and expected — to use the same word with different meanings, because each one is home to its own Ubiquitous Language.
 
 **Example: E-commerce SaaS**
 
@@ -84,7 +82,7 @@ This directly follows from the previous section: if "Ubiquitous Language" only m
 ┌─────────────────────────┐
 │  Catalog Context        		│
 │  - Product              		│  "Product" means catalog item
-│  - Category             		│  with description, images
+│  - Category             		│  with description, price
 │  - Price                		│
 └─────────────────────────┘
 
@@ -151,13 +149,13 @@ Bounded Contexts don't live in isolation — a "Project" from Project Management
 
 The most common patterns:
 
-| Pattern | What it means |
-|---|---|
-| **Shared Kernel** | Two contexts deliberately share a small piece of model (and code) between them. Cheap but creates coupling — changes must be coordinated by both teams. |
-| **Customer-Supplier** | One context (the supplier) produces something another context (the customer) depends on. The supplier's team takes the customer's needs into account when planning changes. |
-| **Conformist** | The downstream context has no negotiating power (e.g. a third-party API) and simply conforms to the upstream model as-is, with no translation layer. |
-| **Anticorruption Layer (ACL)** | The downstream context builds a translation layer that converts the upstream model into its own model, protecting its own Ubiquitous Language from being polluted by someone else's. |
-| **Open Host Service / Published Language** | A context exposes a well-documented, stable protocol (often via API) that any number of other contexts can consume, instead of negotiating one-off integrations. |
+| Pattern                                    | What it means                                                                                                                                                                        |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Shared Kernel**                          | Two contexts deliberately share a small piece of model (and code) between them. Cheap but creates coupling — changes must be coordinated by both teams.                              |
+| **Customer-Supplier**                      | One context (the supplier) produces something another context (the customer) depends on. The supplier's team takes the customer's needs into account when planning changes.          |
+| **Conformist**                             | The downstream context has no negotiating power (e.g. a third-party API) and simply conforms to the upstream model as-is, with no translation layer.                                 |
+| **Anticorruption Layer (ACL)**             | The downstream context builds a translation layer that converts the upstream model into its own model, protecting its own Ubiquitous Language from being polluted by someone else's. |
+| **Open Host Service / Published Language** | A context exposes a well-documented, stable protocol (often via API) that any number of other contexts can consume, instead of negotiating one-off integrations.                     |
 
 **Example mapping in EnterpriseFlow:**
 
@@ -281,7 +279,7 @@ class DateRange {
 
 ### 7. Anemic vs Rich Domain Model
 
-Look back at the `Money` and `Email` examples: the validation and business rules (`isValid`, "currency mismatch") live *inside* the object, not in a separate helper that manipulates plain data. This is a deliberate choice, and it has a name.
+Look back at the `Money` and `Email` examples: the validation and business rules (`isValid`, "currency mismatch") live _inside_ the object, not in a separate helper that manipulates plain data. This is a deliberate choice, and it has a name.
 
 - An **Anemic Domain Model** is one where domain objects are little more than data bags (just getters/setters, or plain fields), and all the actual business logic lives in external "service" classes that read and write those fields.
 - A **Rich Domain Model** puts the business rules on the domain objects themselves — the object protects its own invariants and exposes behavior, not just data.
@@ -394,7 +392,7 @@ order.addItem("product-2", 1, 49.99);
 
 #### Why the boundary exists: invariants
 
-An **invariant** is a business rule that must always hold true, no exception, no matter which code path touches the data. In the example above, "you cannot add items to a shipped order" is an invariant. The aggregate root is the *only* gatekeeper for that invariant — which is exactly why rule #2 exists (external code can't reach `OrderItem` directly) and why rule #3 exists (a single transaction should save or reject the whole aggregate together, so it never ends up half-updated in an invalid state).
+An **invariant** is a business rule that must always hold true, no exception, no matter which code path touches the data. In the example above, "you cannot add items to a shipped order" is an invariant. The aggregate root is the _only_ gatekeeper for that invariant — which is exactly why rule #2 exists (external code can't reach `OrderItem` directly) and why rule #3 exists (a single transaction should save or reject the whole aggregate together, so it never ends up half-updated in an invalid state).
 
 Here's a concrete example of what rule #2 is protecting against — not just a comment, but code that actually breaks the invariant:
 
@@ -415,7 +413,7 @@ shippedOrder.addItem("product-3", 5, 10);
 // throws Error: "Cannot modify shipped order" — invariant protected
 ```
 
-Between *different* aggregates (e.g. an `Order` and a `Customer`), the rule is different: you don't force them into the same transaction. Instead, you accept that they become consistent with each other slightly after the fact — this is called **eventual consistency**, and it's exactly what Domain Events (below) are for.
+Between _different_ aggregates (e.g. an `Order` and a `Customer`), the rule is different: you don't force them into the same transaction. Instead, you accept that they become consistent with each other slightly after the fact — this is called **eventual consistency**, and it's exactly what Domain Events (below) are for.
 
 #### Sizing an aggregate
 
@@ -488,7 +486,7 @@ class Task {
 
 ### 9. Domain Services
 
-Some business logic doesn't naturally belong to any single Entity or Value Object — usually because it involves *several* aggregates at once. Forcing that logic onto one of them would be arbitrary and would blur its responsibility. That's what a **Domain Service** is for: a stateless object, named with a verb from the Ubiquitous Language, that holds logic which spans multiple domain objects.
+Some business logic doesn't naturally belong to any single Entity or Value Object — usually because it involves _several_ aggregates at once. Forcing that logic onto one of them would be arbitrary and would blur its responsibility. That's what a **Domain Service** is for: a stateless object, named with a verb from the Ubiquitous Language, that holds logic which spans multiple domain objects.
 
 ```javascript
 // Domain Service — logic doesn't belong to Account alone,
@@ -506,8 +504,8 @@ class MoneyTransferService {
 
 **Domain Service vs Application Service — don't confuse the two:**
 
-- A **Domain Service** contains *business rules* (e.g. "a transfer requires sufficient funds"). It belongs to the domain layer and knows nothing about HTTP, databases, or transactions.
-- An **Application Service** (like `ProjectService` later in this chapter) *orchestrates*: it loads aggregates from repositories, calls domain logic, saves the result, and publishes events. It coordinates, but it should not itself contain business rules.
+- A **Domain Service** contains _business rules_ (e.g. "a transfer requires sufficient funds"). It belongs to the domain layer and knows nothing about HTTP, databases, or transactions.
+- An **Application Service** (like `ProjectService` later in this chapter) _orchestrates_: it loads aggregates from repositories, calls domain logic, saves the result, and publishes events. It coordinates, but it should not itself contain business rules.
 
 ### 10. Factories
 
@@ -531,7 +529,7 @@ class Project {
   static create(tenantId, name, createdBy) {
     const project = new Project(uuid(), tenantId, name);
     project.addDomainEvent(
-      new ProjectCreatedEvent(tenantId, project.id, createdBy, new Date())
+      new ProjectCreatedEvent(tenantId, project.id, createdBy, new Date()),
     );
     return project;
   }
@@ -581,7 +579,7 @@ class Project {
 
     // Raise domain event
     project.addDomainEvent(
-      new ProjectCreatedEvent(tenantId, project.id, createdBy, new Date())
+      new ProjectCreatedEvent(tenantId, project.id, createdBy, new Date()),
     );
 
     return project;
@@ -593,7 +591,13 @@ class Project {
 
     // Raise domain event
     this.addDomainEvent(
-      new TaskCompletedEvent(this.tenantId, this.id, taskId, userId, new Date())
+      new TaskCompletedEvent(
+        this.tenantId,
+        this.id,
+        taskId,
+        userId,
+        new Date(),
+      ),
     );
   }
 
@@ -678,7 +682,7 @@ class ProjectRepository {
       SELECT * FROM projects
       WHERE id = $1 AND tenant_id = $2
     `,
-      [projectId, tenantId]
+      [projectId, tenantId],
     );
 
     if (!projectData.rows[0]) return null;
@@ -689,14 +693,14 @@ class ProjectRepository {
       SELECT * FROM tasks
       WHERE project_id = $1
     `,
-      [projectId]
+      [projectId],
     );
 
     // Reconstruct aggregate
     const project = new Project(
       projectData.rows[0].id,
       projectData.rows[0].tenant_id,
-      projectData.rows[0].name
+      projectData.rows[0].name,
     );
 
     project.tasks = tasksData.rows.map((t) => new Task(t.id, t.project_id, t));
@@ -715,7 +719,7 @@ class ProjectRepository {
         ON CONFLICT (id) DO UPDATE
         SET name = $3, status = $4, updated_at = NOW()
       `,
-        [project.id, project.tenantId, project.name, project.status]
+        [project.id, project.tenantId, project.name, project.status],
       );
 
       // Save all tasks
@@ -727,7 +731,7 @@ class ProjectRepository {
           ON CONFLICT (id) DO UPDATE
           SET title = $3, status = $4, updated_at = NOW()
         `,
-          [task.id, project.id, task.title, task.status]
+          [task.id, project.id, task.title, task.status],
         );
       }
     });
@@ -737,7 +741,7 @@ class ProjectRepository {
 
 **DDD Repository vs generic CRUD Repository — a common source of confusion:**
 
-A repository in the DDD sense is not just "a class with `findById`/`save`" — it is specifically about persisting and reconstructing a *whole aggregate* while respecting its invariants: notice above how `save()` writes the `Project` root *and* its `Task` children together, inside one transaction, because they're the same aggregate. A generic CRUD repository, by contrast, typically maps one repository to one database table with no notion of aggregate boundaries or consistency — which works fine for simple data, but silently breaks invariants the moment a "repository" per table is used to persist parts of an aggregate independently.
+A repository in the DDD sense is not just "a class with `findById`/`save`" — it is specifically about persisting and reconstructing a _whole aggregate_ while respecting its invariants: notice above how `save()` writes the `Project` root _and_ its `Task` children together, inside one transaction, because they're the same aggregate. A generic CRUD repository, by contrast, typically maps one repository to one database table with no notion of aggregate boundaries or consistency — which works fine for simple data, but silently breaks invariants the moment a "repository" per table is used to persist parts of an aggregate independently.
 
 ---
 
@@ -788,8 +792,8 @@ class Project {
           this.tenantId,
           this.id,
           totalExpenses,
-          this.budget
-        )
+          this.budget,
+        ),
       );
     }
 
@@ -799,7 +803,7 @@ class Project {
   calculateTotalExpenses() {
     return this.expenses.reduce(
       (total, exp) => total.add(exp.amount),
-      new Money(0, this.budget.currency)
+      new Money(0, this.budget.currency),
     );
   }
 
@@ -853,11 +857,11 @@ class ProjectRepository {
       data.id,
       data.tenant_id,
       data.name,
-      new Money(data.budget_amount, data.budget_currency)
+      new Money(data.budget_amount, data.budget_currency),
     );
 
     project.expenses = data.expenses.map(
-      (e) => new Expense(e.id, e.description, new Money(e.amount, e.currency))
+      (e) => new Expense(e.id, e.description, new Money(e.amount, e.currency)),
     );
 
     return project;
@@ -924,7 +928,7 @@ class ProjectController {
       const expense = await projectService.addExpenseToProject(
         req.tenant.id,
         req.params.projectId,
-        req.body
+        req.body,
       );
 
       res.status(201).json(expense);
@@ -941,8 +945,8 @@ class ProjectController {
 Look at the flow of the example above: **Controller → Application Service → Domain (Aggregates, Value Objects, Events) → Repository → Database**. This is a **layered architecture**, and specifically follows the spirit of **Hexagonal Architecture** (also called **Ports & Adapters**):
 
 - The **Domain layer** (`Project`, `Money`, `Expense`, the events) depends on nothing else in the system — no database, no web framework, no external library. It's pure business logic and can be tested in complete isolation.
-- The **Repository** is a *port*: an interface the Domain/Application layer depends on, with a concrete database *adapter* behind it. The Domain never talks to SQL directly.
-- The **Controller** is another *adapter*: it translates an HTTP request into a call to the Application Service, and translates the result back into an HTTP response.
+- The **Repository** is a _port_: an interface the Domain/Application layer depends on, with a concrete database _adapter_ behind it. The Domain never talks to SQL directly.
+- The **Controller** is another _adapter_: it translates an HTTP request into a call to the Application Service, and translates the result back into an HTTP response.
 
 The dependency rule is always one-directional: **everything depends on the Domain, the Domain depends on nothing.** This is what makes it possible to swap the database, the web framework, or the message bus without touching a single business rule — and it's also why the Domain Services introduced earlier must stay free of any infrastructure concern.
 
