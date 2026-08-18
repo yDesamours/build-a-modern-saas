@@ -50,7 +50,7 @@ Complete history! Can replay to any point in time.
 
 ### 1. Define Events
 
-Every event below is the immutable record of a Command that was accepted — a `changeBudget(...)` command call, once validated, is what produces a `ProjectBudgetChangedEvent`. Keep that link in mind as you read the aggregate code further down: the command decides _whether_ something is allowed to happen, the event records _that_ it happened.
+Every event below is the immutable record of a Command that was accepted — a `changeBudget(...)` command call, once validated, is what produces a `ProjectBudgetChangedEvent`. The command decides _whether_ something is allowed to happen, the event records _that_ it happened.
 
 ```javascript
 // Base Event
