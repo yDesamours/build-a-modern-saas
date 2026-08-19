@@ -119,6 +119,8 @@ class ProjectStatusChangedEvent extends DomainEvent {
 }
 ```
 
+**A word of caution on `metadata.version`.** The `version: 1` field set inside `DomainEvent` is easy to misread as "this is the 3rd event for this aggregate" — it isn't. It's the **schema version** of the event's shape, used later for upcasting (section 9) when `ProjectCreatedEvent`'s `data` structure changes over time. It's hardcoded to `1` here because every event starts life as schema v1; it only changes when an upcaster rewrites an old event into a newer shape. Where an event sits in a _sequence_ — 1st, 2nd, 3rd change to this particular project — is a completely different number, tracked separately by the event store (see the `version` column in section 3). Two fields, same English word, unrelated meanings. Keep them apart mentally, because section 7 shows what happens when code doesn't.
+
 ### 2. Aggregate that Produces Events
 
 ```javascript
@@ -307,15 +309,25 @@ class EventStore {
     return result.rows.map((row) => this.deserializeEvent(row));
   }
 
-  // Get all events (for projections)
-  async getAllEvents(fromVersion = 0) {
+  // Get all events (for projections), ordered across ALL aggregates
+  //
+  // Deliberately NOT using the `version` column here: version is scoped
+  // to a single aggregate_id (see the UNIQUE(aggregate_id, version)
+  // constraint below) — every aggregate independently has a version 1,
+  // a version 2, and so on. Comparing it across different aggregates
+  // gives no meaningful order at all. `global_position` is a separate,
+  // table-wide BIGSERIAL that increases monotonically regardless of
+  // which aggregate wrote the row — that's what a cross-aggregate
+  // consumer like an EventProcessor needs to walk the log in order and
+  // resume from where it left off. See section 7 for how it's used.
+  async getAllEvents(fromPosition = 0) {
     const result = await this.db.query(
       `
       SELECT * FROM events
-      WHERE version > $1
-      ORDER BY version ASC
+      WHERE global_position > $1
+      ORDER BY global_position ASC
     `,
-      [fromVersion],
+      [fromPosition],
     );
 
     return result.rows.map((row) => this.deserializeEvent(row));
@@ -344,6 +356,8 @@ class EventStore {
     event.eventType = row.event_type;
     event.data = JSON.parse(row.data);
     event.metadata = JSON.parse(row.metadata);
+    event.aggregateVersion = row.version; // per-aggregate sequence
+    event.globalPosition = row.global_position; // cross-aggregate cursor
 
     return event;
   }
@@ -498,11 +512,19 @@ class ProjectProjection {
   }
 
   async handleProjectCreated(event) {
+    // ON CONFLICT DO NOTHING, not a plain INSERT: this handler WILL be
+    // called more than once for the same event over the system's
+    // lifetime — a catch-up after a restart, a full projection rebuild,
+    // an at-least-once delivery retry from a broker. Without this, the
+    // second call hits the primary key on `id` and the processor
+    // crashes. This is the "idempotent projections" principle from the
+    // end of this chapter, applied concretely.
     await this.db.query(
       `
       INSERT INTO project_read_model (
         id, tenant_id, name, status, budget, created_by, created_at
       ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+      ON CONFLICT (id) DO NOTHING
     `,
       [
         event.aggregateId,
@@ -560,16 +582,47 @@ class ProjectProjection {
 
 ### 7. Event Processor for Multiple Projections
 
+**What an Event Processor actually is.** Strip away the code for a moment. An Event Processor is a component that consumes the event stream and derives something else from it — most often a read model, but not only that (a notification, an outbound integration call, a command sent to a different aggregate — a Saga in section 10 is really a specialized Event Processor whose "projection" issues commands instead of writing rows). Whatever it produces, it has exactly three jobs:
+
+1. **Read events in order** — across all the aggregates it cares about, without skipping any.
+2. **React to each one** — hand it to whatever logic knows what to do with that event type.
+3. **Remember where it stopped** — so a restart resumes instead of reprocessing everything, or missing what came in while it was down.
+
+This is a generic role, not a single fixed pattern — you'll see the same idea called a **Projector**, **Subscriber**, **Denormalizer**, or **Event Handler** depending on the codebase and the community. The name in this chapter is just one of several in common use.
+
+**Pull vs. push.** The implementation below _polls_ — it asks the event store "anything new?" on a timer. That's one valid way for an Event Processor to learn an event exists, but not the only one: with a message broker, the store publishes each event right after persisting it, and the processor is _notified_ instead of asking. The three responsibilities above don't change either way — only how the processor learns an event exists does. Polling trades a small, bounded delay (here, up to the 1-second interval) for simplicity: no broker to run, no dual-write between the database and a queue to reconcile.
+
+**Why iterate over every projection instead of picking "the right one"?** Because the relationship between an event and projections isn't one-to-one — it's fan-out. A single `ProjectCreated` event might matter to the main read model, an audit log, a billing projection, and an analytics pipeline simultaneously, or to none of them. Rather than have the processor maintain a registry of "who cares about what" — which couples it to every projection's internals and has to be updated each time a projection changes what it listens for — each projection decides for itself, via its own `switch`, what it cares about and silently ignores the rest. Calling `project()` on a projection that ends up doing nothing is a cheap in-memory dispatch, not I/O; it only becomes worth optimizing (e.g. a `handledEventTypes()` filter) with very many projections or expensive handlers.
+
+**The cursor bug this chapter used to have.** An earlier version of this code advanced its cursor with `this.lastProcessedVersion = event.metadata.version`. Two problems, both worth naming explicitly because they're easy to reintroduce: first, `metadata.version` is the _schema_ version flagged in the callout back in section 1 — it's `1` for practically every event, so the cursor never meaningfully moved. Second, even the database's own `version` column wouldn't have fixed it, because that column is scoped _per aggregate_ — every project's event history starts its own `version` back at 1, so it carries no valid ordering across different aggregates. What a cross-aggregate consumer needs is `global_position` (introduced in section 3): a single, table-wide, monotonically increasing sequence, independent of both of the above.
+
+**The checkpoint also needs to survive a restart.** Keeping the cursor in an instance field, as below, means every process restart forgets it and reprocesses the entire event store from the beginning. That's harmless _only_ because `handleProjectCreated` is now idempotent (`ON CONFLICT DO NOTHING`, section 6) — without that, a restart would crash the processor on the first duplicate insert. In production, the checkpoint is persisted, typically in a small table keyed by processor name:
+
+```sql
+CREATE TABLE processor_checkpoints (
+  processor_name VARCHAR(255) PRIMARY KEY,
+  last_position BIGINT NOT NULL DEFAULT 0,
+  updated_at TIMESTAMP NOT NULL
+);
+```
+
 ```javascript
 class EventProcessor {
-  constructor(eventStore, projections) {
+  constructor(eventStore, projections, db, processorName = "default") {
     this.eventStore = eventStore;
     this.projections = projections;
-    this.lastProcessedVersion = 0;
+    this.db = db;
+    this.processorName = processorName;
+    this.lastProcessedPosition = 0;
   }
 
   async start() {
-    // Initial catch-up
+    this.lastProcessedPosition = await this.loadCheckpoint();
+
+    // Initial catch-up — on a fresh checkpoint (0), this replays the
+    // entire event store, which is exactly what a full projection
+    // rebuild needs. On a warm checkpoint, it only replays what's new
+    // since the last run. Same code path, different starting position.
     await this.catchUp();
 
     // Poll for new events
@@ -577,24 +630,18 @@ class EventProcessor {
   }
 
   async catchUp() {
-    const events = await this.eventStore.getAllEvents(
-      this.lastProcessedVersion,
-    );
-
-    for (const event of events) {
-      await this.processEvent(event);
-      this.lastProcessedVersion = event.metadata.version;
-    }
+    await this.processNewEvents();
   }
 
   async processNewEvents() {
     const events = await this.eventStore.getAllEvents(
-      this.lastProcessedVersion,
+      this.lastProcessedPosition,
     );
 
     for (const event of events) {
       await this.processEvent(event);
-      this.lastProcessedVersion = event.metadata.version;
+      this.lastProcessedPosition = event.globalPosition;
+      await this.saveCheckpoint(this.lastProcessedPosition);
     }
   }
 
@@ -610,6 +657,26 @@ class EventProcessor {
     }
   }
 
+  async loadCheckpoint() {
+    const result = await this.db.query(
+      `SELECT last_position FROM processor_checkpoints WHERE processor_name = $1`,
+      [this.processorName],
+    );
+    return result.rows[0]?.last_position ?? 0;
+  }
+
+  async saveCheckpoint(position) {
+    await this.db.query(
+      `
+      INSERT INTO processor_checkpoints (processor_name, last_position, updated_at)
+      VALUES ($1, $2, $3)
+      ON CONFLICT (processor_name) DO UPDATE
+      SET last_position = $2, updated_at = $3
+    `,
+      [this.processorName, position, new Date()],
+    );
+  }
+
   stop() {
     if (this.interval) {
       clearInterval(this.interval);
@@ -618,7 +685,23 @@ class EventProcessor {
 }
 ```
 
+**Scoping a processor to less than "everything."** Nothing requires a single Event Processor that fans out across every aggregate type, as above. It's just as common to run several, each narrower — one per aggregate type, one per bounded context, or one per individual projection — by filtering at the source instead of relying on projections to self-filter:
+
+```sql
+SELECT * FROM events
+WHERE aggregate_type = 'Project' AND global_position > $1
+ORDER BY global_position ASC
+```
+
+The one thing this requires: **each processor needs its own checkpoint**, not a shared one — `processor_checkpoints` above is already keyed by `processor_name` for exactly this reason. A `BillingProcessor` and a broad `AuditProcessor` don't advance at the same rate or over the same subset of events, so they can't share a single position. This is the same idea as Kafka consumer groups, where each group tracks its own offset independently, even when reading the same underlying stream.
+
+**A narrower rebuild doesn't need `global_position` at all.** If what you're rebuilding only ever touches one aggregate at a time — like `project_read_model`, where each row is independent and the relative order between, say, `p1`'s events and `p2`'s events doesn't affect the final result — you don't strictly need a cross-aggregate cursor. An alternative is to iterate over distinct `aggregate_id`s of that type and replay each one's own history in full (already correctly ordered by its per-aggregate `version`), tracking "which aggregate IDs are done" as the checkpoint instead of a stream position. `global_position` earns its keep specifically when you need a resumable, ordered view _across_ aggregates — not for every rebuild.
+
 ### 8. Snapshots for Performance
+
+**What a snapshot is.** A snapshot is a saved copy of a single aggregate's state at a specific `version`, kept so that loading that aggregate doesn't require replaying its entire event history from the beginning every time. Reconstructing a 5-event aggregate via `Project.fromEvents(events)` is trivial; reconstructing one with 50,000 events on every `findById()` call is not — most of that cost is wasted, since only the final state is actually needed.
+
+**It's a cache, not a new source of truth.** This is the key distinction from a projection: a projection (section 6) derives a _different_ view — a denormalized table, shaped for queries the write model doesn't answer directly. A snapshot contains exactly the same fields as the aggregate itself; it's disposable and reconstructible from events at any time. If a snapshot is lost or corrupted, the worst outcome is a slower load (fall back to a full replay) — never incorrect state, as long as the replay logic itself is correct. It's also scoped to a single aggregate instance, unlike a projection or an Event Processor, which typically span many.
 
 For aggregates with many events, snapshots improve load performance.
 
@@ -681,9 +764,14 @@ class SnapshotProjectRepository extends EventSourcedProjectRepository {
       project = new Project();
     }
 
-    // Load events since snapshot
+    // Load events since snapshot. Note: filtering on `aggregateVersion`
+    // (the per-aggregate sequence from the `version` column), not
+    // `metadata.version` (the schema version, hardcoded to 1 — see the
+    // callout in section 1). Filtering on metadata.version here would
+    // compare "1" to a snapshot version like 50 and silently find zero
+    // new events every time, defeating the whole point of snapshotting.
     const events = await this.eventStore.getEventsForAggregate(projectId);
-    const newEvents = events.filter((e) => e.metadata.version > fromVersion);
+    const newEvents = events.filter((e) => e.aggregateVersion > fromVersion);
 
     // Apply new events
     for (const event of newEvents) {
@@ -928,7 +1016,8 @@ CREATE TABLE events (
   event_type VARCHAR(255) NOT NULL,
   data JSONB NOT NULL,
   metadata JSONB NOT NULL,
-  version INTEGER NOT NULL,
+  version INTEGER NOT NULL,        -- per-aggregate sequence (optimistic concurrency)
+  global_position BIGSERIAL,       -- table-wide, monotonic (cross-aggregate cursor)
   created_at TIMESTAMP NOT NULL,
 
   UNIQUE(aggregate_id, version)
@@ -937,6 +1026,15 @@ CREATE TABLE events (
 CREATE INDEX idx_events_aggregate ON events(aggregate_id);
 CREATE INDEX idx_events_type ON events(event_type);
 CREATE INDEX idx_events_created ON events(created_at);
+CREATE INDEX idx_events_global_position ON events(global_position);
+
+-- Event Processor checkpoints (one row per processor, so independently
+-- scoped processors don't share a position — see section 7)
+CREATE TABLE processor_checkpoints (
+  processor_name VARCHAR(255) PRIMARY KEY,
+  last_position BIGINT NOT NULL DEFAULT 0,
+  updated_at TIMESTAMP NOT NULL
+);
 
 -- Snapshots table
 CREATE TABLE snapshots (
@@ -963,6 +1061,20 @@ CREATE INDEX idx_projects_status ON project_read_model(status);
 ```
 
 ---
+
+## Purpose-Built Event Stores
+
+Everything so far uses Postgres, with the event-store behaviors (per-aggregate versioning, global ordering, catch-up processing) built by hand on top of a general-purpose relational database. That's a legitimate, common choice — but it's worth knowing that dedicated event-store databases exist, because they turn several of the mechanisms built by hand in this chapter into native engine features.
+
+**EventStoreDB (now KurrentDB)** is the best-known example. Event Store the company rebranded to Kurrent, and the product is now called KurrentDB — same underlying technology, new name. It's built specifically around an append-only event log, rather than adding one on top of a general-purpose database.
+
+**Streams instead of hand-rolled aggregate versioning.** Every aggregate gets its own **stream** (e.g. `project-p1`), and each append to that stream produces a new stream version, checked against an expected version supplied by the caller — exactly the optimistic concurrency control this chapter implemented with `expectedVersion` and the `UNIQUE(aggregate_id, version)` constraint, except it's a first-class feature of the database rather than something to construct and maintain.
+
+**Global ordering without the gap problem.** The database assigns each event a position that's both globally ordered across all streams and causally ordered within a stream — the same role `global_position` plays in this chapter's schema. The difference is durability of that guarantee: this chapter's version, built on a Postgres `BIGSERIAL`, has a known edge case under concurrent transactions (a lower position can become visible _after_ a higher one has already been read — see section 7). A database built around the event log from the ground up doesn't inherit that problem, because reads aren't racing writes on a column bolted onto a general-purpose table.
+
+**Catch-up subscriptions instead of a hand-rolled `EventProcessor`.** This maps directly onto the pull-then-push pattern built in section 7: a catch-up subscription replays everything from a given position, then transparently switches to live push delivery for new events. The client still owns its checkpoint (much like this chapter's `processor_checkpoints` table), but the polling loop, the position tracking during catch-up, and the switch-over to live delivery are handled by the database rather than by application code.
+
+**The trade-off.** These guarantees aren't free. A specialized event store gives up the general-purpose SQL this chapter's Postgres-based design keeps for free — no ad hoc joins, no rich analytical queries directly against the write side, and one more specialized piece of infrastructure to operate and monitor. In practice, many teams split the difference: use a dedicated event store as the write-side source of truth, and still project into Postgres (or another general-purpose store) for reads. The `EventProcessor` role from section 7 doesn't disappear in that setup — it just reads from a different kind of source.
 
 ## Key Principles
 
